@@ -7,7 +7,7 @@ import aiohttp
 from aiocache import cached
 
 FLOOD_DETECTED = False
-CACHE = None
+CACHE = {}
 
 _logger = logging.getLogger(__name__)
 
@@ -24,7 +24,6 @@ async def get_kas_price():
 async def get_kas_market_data():
     global FLOOD_DETECTED
     global CACHE
-    CACHE = {}
     if not FLOOD_DETECTED or time.time() - FLOOD_DETECTED > 300:
         _logger.debug("Querying CoinGecko now.")
         async with aiohttp.ClientSession() as session:
