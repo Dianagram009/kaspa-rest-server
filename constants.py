@@ -55,6 +55,7 @@ MAX_SUPPLY_KAS = max_supply
 CRESCENDO_BS = crescendo_bs
 
 REGEX_KASPA_ADDRESS = "^" + ADDRESS_PREFIX + ":[a-z0-9]{61,63}$"
+REGEX_KASPA_HASH = r"^[a-f0-9]{64}$"
 
 REGEX_DATE = r"^\d{4}-\d{2}-\d{2}$"
 REGEX_DATE_OPTIONAL_DAY = r"^\d{4}-\d{2}(-\d{2})?$"
