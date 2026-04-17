@@ -6,12 +6,18 @@ from typing import List, Optional
 
 from fastapi import Path, HTTPException, Query
 from kaspa_script_address import to_address
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, conlist, constr, validator
 from sqlalchemy import exists, text
 from sqlalchemy.future import select
 from starlette.responses import Response
 
-from constants import TX_SEARCH_ID_LIMIT, TX_SEARCH_BS_LIMIT, PREV_OUT_RESOLVED, ADDRESS_PREFIX
+from constants import (
+    ADDRESS_PREFIX,
+    PREV_OUT_RESOLVED,
+    REGEX_KASPA_HASH,
+    TX_SEARCH_BS_LIMIT,
+    TX_SEARCH_ID_LIMIT,
+)
 from dbsession import async_session, async_session_blocks
 from endpoints import filter_fields, sql_db_only
 from endpoints.get_blocks import get_block_from_kaspad
@@ -81,18 +87,28 @@ class TxModel(BaseModel):
         orm_mode = True
 
 
+TransactionIdStr = constr(regex=REGEX_KASPA_HASH)
+
+
 class TxSearchAcceptingBlueScores(BaseModel):
-    gte: int
-    lt: int
+    gte: int = Field(ge=0, description="Lower bound (inclusive) of the accepting block's blue score.")
+    lt: int = Field(ge=0, description="Upper bound (exclusive) of the accepting block's blue score.")
+
+    @validator("lt")
+    def _lt_must_exceed_gte(cls, lt, values):
+        gte = values.get("gte")
+        if gte is not None and lt <= gte:
+            raise ValueError("acceptingBlueScores.lt must be greater than acceptingBlueScores.gte")
+        return lt
 
 
 class TxSearch(BaseModel):
-    transactionIds: List[str] | None
+    transactionIds: conlist(TransactionIdStr, min_items=1) | None
     acceptingBlueScores: TxSearchAcceptingBlueScores | None
 
 
 class TxAcceptanceRequest(BaseModel):
-    transactionIds: list[str] = Field(
+    transactionIds: conlist(TransactionIdStr, min_items=1) = Field(
         example=[
             "b9382bdee4aa364acf73eda93914eaae61d0e78334d1b8a637ab89ef5e224e41",
             "1e098b3830c994beb28768f7924a38286cec16e85e9757e0dc3574b85f624c34",
@@ -129,8 +145,12 @@ class AcceptanceMode(str, Enum):
 @sql_db_only
 async def get_transaction(
     response: Response,
-    transaction_id: str = Path(regex="[a-f0-9]{64}"),
-    blockHash: str = Query(None, description="Specify a containing block (if known) for faster lookup"),
+    transaction_id: str = Path(regex=REGEX_KASPA_HASH, description="Transaction id as a 64-character hex string"),
+    blockHash: Optional[str] = Query(
+        None,
+        regex=REGEX_KASPA_HASH,
+        description="Specify a containing block (if known) for faster lookup. Must be a 64-character hex string.",
+    ),
     inputs: bool = True,
     outputs: bool = True,
     resolve_previous_outpoints: PreviousOutpointLookupMode = Query(
@@ -242,19 +262,19 @@ async def search_for_transactions(
     Search for transactions by transaction_ids or blue_score
     """
     if not txSearch.transactionIds and not txSearch.acceptingBlueScores:
-        return []
-
-    if txSearch.transactionIds and len(txSearch.transactionIds) > TX_SEARCH_ID_LIMIT:
-        raise HTTPException(422, f"Too many transaction ids. Max {TX_SEARCH_ID_LIMIT}")
+        raise HTTPException(422, "Exactly one of transactionIds or acceptingBlueScores must be provided")
 
     if txSearch.transactionIds and txSearch.acceptingBlueScores:
         raise HTTPException(422, "Only one of transactionIds and acceptingBlueScores must be non-null")
+
+    if txSearch.transactionIds and len(txSearch.transactionIds) > TX_SEARCH_ID_LIMIT:
+        raise HTTPException(422, f"Too many transaction ids. Max {TX_SEARCH_ID_LIMIT}")
 
     if (
         txSearch.acceptingBlueScores
         and txSearch.acceptingBlueScores.lt - txSearch.acceptingBlueScores.gte > TX_SEARCH_BS_LIMIT
     ):
-        raise HTTPException(400, f"Diff between acceptingBlueScores.gte and lt must be <= {TX_SEARCH_BS_LIMIT}")
+        raise HTTPException(422, f"Diff between acceptingBlueScores.gte and lt must be <= {TX_SEARCH_BS_LIMIT}")
 
     transaction_ids = set(txSearch.transactionIds or [])
     accepting_blue_score_gte = txSearch.acceptingBlueScores.gte if txSearch.acceptingBlueScores else None
@@ -274,7 +294,7 @@ async def search_for_transactions(
                 .order_by(Transaction.block_time.desc())
             )
 
-            if accepting_blue_score_gte:
+            if accepting_blue_score_gte is not None:
                 tx_acceptances = await session_blocks.execute(
                     select(
                         Block.hash.label("accepting_block_hash"),
